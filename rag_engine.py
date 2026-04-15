@@ -73,15 +73,16 @@ class RagEngine:
     def __init__(self, config_path="config.yaml"):
         self.sm     = StorageManager(config_path)
         self.config = self._charger_config(config_path)
-        self.llm_cfg = self.config.get("llm", {})
-
-        # Endpoint LLM interne (compatible OpenAI /v1/chat/completions)
-        self.endpoint    = self.llm_cfg.get("endpoint", "http://localhost:11434/v1")
-        self.model       = self.llm_cfg.get("model", "mistral")
+        self.llm_cfg     = self.config.get("llm", {})
+        self.api_key     = self.llm_cfg.get("api_key", "")
+        self.base_url    = self.llm_cfg.get("base_url", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+        self.model       = self.llm_cfg.get("model", "qwen-plus")
         self.max_tokens  = self.llm_cfg.get("max_tokens", 1000)
         self.temperature = self.llm_cfg.get("temperature", 0.2)
 
-        log.info(f"RagEngine — endpoint : {self.endpoint} — modèle : {self.model}")
+        if not self.api_key:
+            log.warning("RagEngine — aucune api_key configurée dans config.yaml (llm.api_key)")
+        log.info(f"RagEngine — base_url : {self.base_url} — modèle : {self.model}")
 
     def _charger_config(self, path) -> dict:
         p = Path(path)
@@ -177,41 +178,42 @@ class RagEngine:
 
     def _appeler_llm(self, systeme: str, utilisateur: str) -> str:
         """
-        Appelle le LLM interne via l'API compatible OpenAI.
-        Retourne la réponse textuelle ou un message d'erreur.
+        Appelle l'API Qwen (compatible OpenAI) via base_url + api_key.
+        Retourne la réponse textuelle ou un message d'erreur lisible.
         """
+        if not self.api_key:
+            return "[LLM non configuré — ajoute llm.api_key dans config.yaml]"
         try:
             import urllib.request
-            import urllib.error
 
             payload = json.dumps({
                 "model":       self.model,
                 "max_tokens":  self.max_tokens,
                 "temperature": self.temperature,
                 "messages": [
-                    {"role": "system",    "content": systeme},
-                    {"role": "user",      "content": utilisateur},
+                    {"role": "system", "content": systeme},
+                    {"role": "user",   "content": utilisateur},
                 ],
             }).encode("utf-8")
 
+            url = self.base_url.rstrip("/") + "/chat/completions"
             req = urllib.request.Request(
-                f"{self.endpoint}/chat/completions",
+                url,
                 data=payload,
                 headers={
-                    "Content-Type": "application/json",
-                    # Ajouter ici la clé API si nécessaire :
-                    # "Authorization": f"Bearer {self.llm_cfg.get('api_key', '')}",
+                    "Content-Type":  "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
                 },
                 method="POST",
             )
 
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read())
                 return data["choices"][0]["message"]["content"].strip()
 
         except Exception as e:
             log.error(f"Erreur LLM : {e}")
-            return f"[LLM indisponible : {e}]"
+            return f"[Erreur LLM : {e}]"
 
     # ── Requête principale ────────────────────────────────────────────────────
 
@@ -304,7 +306,7 @@ class RagEngine:
         Vérifie que le LLM interne répond.
         Affiche un message clair selon le résultat.
         """
-        print(f"Test connexion LLM : {self.endpoint} — modèle : {self.model}")
+        print(f"Test connexion LLM : {self.base_url} — modèle : {self.model}")
         reponse = self._appeler_llm(
             systeme="Tu es un assistant. Réponds en un mot.",
             utilisateur="Dis juste 'OK'."

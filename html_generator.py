@@ -33,33 +33,20 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger(__name__)
 
 
-def preparer_donnees(sm: StorageManager, quinzaine: str | None = None) -> dict:
-    quinzaines = sm.lister_quinzaines()
-    if not quinzaines:
-        log.error("Aucune donnée — lance excel_parser.py d'abord")
-        return {}
+def _calculer_snapshot(sm, q: str, quinzaines: list) -> dict:
+    """Calcule toutes les données pour une quinzaine donnée."""
+    df   = sm.charger_quinzaines(quinzaines=[q])
+    kpis = sm.kpis(quinzaine=q)
 
-    q_active = quinzaine or quinzaines[-1]
-    df       = sm.charger_quinzaines(quinzaines=[q_active])
-    kpis     = sm.kpis(quinzaine=q_active)
-    meta     = sm.charger_meta()
-
-    idx    = quinzaines.index(q_active)
+    idx    = quinzaines.index(q)
     q_prev = quinzaines[idx - 1] if idx > 0 else None
     delta  = []
     if q_prev:
-        df_d = sm.delta_quinzaines(q_prev, q_active)
+        df_d = sm.delta_quinzaines(q_prev, q)
         if not df_d.empty:
             delta = df_d.where(df_d.notna(), None).to_dict(orient="records")
 
-    historiques = {}
     projets = df.where(df.notna(), None).to_dict(orient="records") if not df.empty else []
-    for pid in set(p["projet_id"] for p in projets):
-        h = sm.projet(pid)
-        if not h.empty:
-            historiques[pid] = h.where(h.notna(), None).to_dict(orient="records")
-
-    domaines = sorted(set(p.get("domaine") or "" for p in projets if p.get("domaine")))
 
     par_domaine = {}
     par_resp    = {}
@@ -70,7 +57,6 @@ def preparer_donnees(sm: StorageManager, quinzaine: str | None = None) -> dict:
         s = (p.get("statut") or "").upper()
         for k2 in ["on_track","at_risk","late","done","on_hold"]:
             if s == k2.upper(): par_domaine[d][k2] += 1
-
         r = p.get("responsable_principal") or "Non assigné"
         par_resp.setdefault(r, {"total":0,"en_cours":0,"domaines":[]})
         par_resp[r]["total"] += 1
@@ -80,18 +66,62 @@ def preparer_donnees(sm: StorageManager, quinzaine: str | None = None) -> dict:
             par_resp[r]["domaines"].append(dom)
 
     return {
-        "genere_le":   datetime.now().strftime("%d/%m/%Y à %H:%M"),
-        "quinzaines":  quinzaines,
-        "quinzaine":   q_active,
-        "q_prev":      q_prev,
-        "kpis":        kpis,
         "projets":     projets,
-        "domaines":    domaines,
+        "kpis":        kpis,
         "par_domaine": par_domaine,
         "par_resp":    par_resp,
-        "meta":        meta.where(meta.notna(), None).to_dict(orient="records") if not meta.empty else [],
+        "domaines":    sorted(set(p.get("domaine") or "" for p in projets if p.get("domaine"))),
+        "q_prev":      q_prev,
         "delta":       delta,
+    }
+
+
+def preparer_donnees(sm: StorageManager, quinzaine: str | None = None) -> dict:
+    quinzaines = sm.lister_quinzaines()
+    if not quinzaines:
+        log.error("Aucune donnée — lance excel_parser.py d'abord")
+        return {}
+
+    # Tri chronologique naturel (Q1_2025_S1 < Q1_2025_S2 < Q2_2025_S1 ...)
+    quinzaines_triees = sorted(quinzaines)
+    q_active = quinzaine or quinzaines_triees[-1]
+    if q_active not in quinzaines_triees:
+        log.warning(f"Quinzaine '{q_active}' introuvable, utilisation de la dernière")
+        q_active = quinzaines_triees[-1]
+
+    meta = sm.charger_meta()
+
+    # Historiques tous projets (pour les modals de détail)
+    df_all = sm.charger_quinzaines()
+    historiques = {}
+    if not df_all.empty:
+        for pid in df_all["projet_id"].unique():
+            h = sm.projet(pid)
+            if not h.empty:
+                historiques[pid] = h.where(h.notna(), None).to_dict(orient="records")
+
+    # Snapshot de chaque quinzaine — embarqué pour le sélecteur JS
+    snapshots = {}
+    for q in quinzaines_triees:
+        log.info(f"Préparation snapshot : {q}")
+        snapshots[q] = _calculer_snapshot(sm, q, quinzaines_triees)
+
+    snap = snapshots[q_active]
+
+    return {
+        "genere_le":   __import__("datetime").datetime.now().strftime("%d/%m/%Y à %H:%M"),
+        "quinzaines":  quinzaines_triees,
+        "quinzaine":   q_active,
+        "q_prev":      snap["q_prev"],
+        "kpis":        snap["kpis"],
+        "projets":     snap["projets"],
+        "domaines":    snap["domaines"],
+        "par_domaine": snap["par_domaine"],
+        "par_resp":    snap["par_resp"],
+        "delta":       snap["delta"],
+        "meta":        meta.where(meta.notna(), None).to_dict(orient="records") if not meta.empty else [],
         "historiques": historiques,
+        "snapshots":   snapshots,
     }
 
 
@@ -124,6 +154,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
 .page-title{font-size:15px;font-weight:600;color:#1a1a2e;}
 .spacer{flex:1;}
 .snap-info{font-size:11px;color:#6b7280;}
+.q-selector-wrap{padding:10px 14px 6px;}
+.q-selector-label{font-size:9px;font-weight:700;color:#6b7280;letter-spacing:.08em;text-transform:uppercase;margin-bottom:5px;}
+.q-selector{width:100%;background:#0d1117;color:#c8cfe0;border:1px solid #2a2f40;border-radius:6px;
+            padding:6px 8px;font-size:11px;cursor:pointer;outline:none;}
+.q-selector:focus{border-color:#4e8fff;}
+.q-selector option{background:#0d1117;color:#c8cfe0;}
 .gen-at{font-size:10px;color:#9ca3af;}
 .btn-pdf{font-size:11px;padding:5px 12px;background:#1a1a2e;color:#fff;
          border:none;border-radius:6px;cursor:pointer;}
@@ -269,6 +305,10 @@ def generer_html(donnees: dict, llm_cache: dict | None = None) -> str:
       <span>Outil de pilotage</span>
       <div class="logo-date" id="logo-date"></div>
     </div>
+    <div class="q-selector-wrap">
+      <div class="q-selector-label">Quinzaine</div>
+      <select class="q-selector" id="q-selector" onchange="switchQuinzaine(this.value)"></select>
+    </div>
     <div class="nav-section">Navigation</div>
     <div class="nav-item active" data-page="overview"><span class="nav-dot" style="background:#4e8fff"></span>Vue d'ensemble</div>
     <div class="nav-item" data-page="domaines"><span class="nav-dot" style="background:#10b981"></span>Par domaine</div>
@@ -334,13 +374,42 @@ function initials(n){{return(n||"??").split(/\s+/).map(w=>w[0]).join("").toUpper
 function avStyle(n){{const c=[["#dbeafe","#1d4ed8"],["#d1fae5","#065f46"],["#ede9fe","#5b21b6"],["#fef3c7","#b45309"],["#fce7f3","#9d174d"],["#e0f2fe","#0369a1"]];const[bg,fg]=c[(n||"X").charCodeAt(0)%c.length];return`background:${{bg}};color:${{fg}}`;}}
 function projItem(p){{const col=SC[p.statut]||"#9ca3af";return`<div class="proj-item" onclick="openModal('${{esc(p.projet_id)}}')"><span class="proj-dot" style="background:${{col}}"></span><span class="proj-name" title="${{esc(p.projet_nom)}}">${{esc(p.projet_nom)}}</span>${{badge(p.statut)}}<span class="proj-pct">${{p.avancement_pct||0}}%</span><span class="proj-resp">${{esc(p.responsable_principal||"")}}</span></div>`;}}
 
+function switchQuinzaine(q){{
+  if(!DATA.snapshots||!DATA.snapshots[q])return;
+  const snap=DATA.snapshots[q];
+  DATA.quinzaine=q;
+  DATA.q_prev=snap.q_prev;
+  DATA.kpis=snap.kpis;
+  DATA.projets=snap.projets;
+  DATA.domaines=snap.domaines;
+  DATA.par_domaine=snap.par_domaine;
+  DATA.par_resp=snap.par_resp;
+  DATA.delta=snap.delta;
+  document.getElementById("snap-info").textContent=q+(snap.q_prev?" (vs "+snap.q_prev+")":"");
+  document.getElementById("chat-q-label").textContent=q;
+  renderOverview();renderDomaines();renderCollabs();renderEvolutions();
+  const ganttPage=document.getElementById("page-gantt");
+  if(ganttPage&&ganttPage.innerHTML.trim()!=="")renderGantt();
+}}
+
 (function init(){{
   document.getElementById("logo-date").textContent="Généré le "+DATA.genere_le;
   document.getElementById("gen-at").textContent=DATA.genere_le;
   document.getElementById("snap-info").textContent=DATA.quinzaine+(DATA.q_prev?" (vs "+DATA.q_prev+")":"");
   document.getElementById("chat-q-label").textContent=DATA.quinzaine;
-  const qs=["Résumé de la quinzaine","Projets en retard ?","Risques actifs ?","Décisions prises ?","Blocages ?"];
-  document.getElementById("chat-qs").innerHTML=qs.map(q=>`<button class="chat-q" onclick="askChat('${{q}}')">${{q}}</button>`).join("");
+
+  // Sélecteur quinzaine — ordre chronologique, la plus récente en premier
+  const sel=document.getElementById("q-selector");
+  const qs_sorted=[...DATA.quinzaines].reverse();
+  qs_sorted.forEach(q=>{{
+    const opt=document.createElement("option");
+    opt.value=q; opt.textContent=q;
+    if(q===DATA.quinzaine)opt.selected=true;
+    sel.appendChild(opt);
+  }});
+
+  const qsChat=["Résumé de la quinzaine","Projets en retard ?","Risques actifs ?","Décisions prises ?","Blocages ?"];
+  document.getElementById("chat-qs").innerHTML=qsChat.map(q=>`<button class="chat-q" onclick="askChat('${{q}}')">${{q}}</button>`).join("");
   document.querySelectorAll(".nav-item[data-page]").forEach(el=>{{
     el.addEventListener("click",()=>{{
       document.querySelectorAll(".nav-item").forEach(n=>n.classList.remove("active"));
