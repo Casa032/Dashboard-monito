@@ -1,0 +1,34 @@
+# ============================================================
+#  config.yaml — Project Intelligence
+#  Pipeline : monito.xlsx → Parquet → dashboard + PDF
+# ============================================================
+
+paths:
+  # Fichier Excel unique de monitoring (rempli directement, sans fiches individuelles)
+  excel_source:  "data/monito.xlsx"
+
+  # Stockage Parquet (généré automatiquement)
+  parquet_dir:   "storage/parquet"
+
+  # Dashboard HTML généré
+  dashboard_out: "frontend/dashboard.html"
+
+  # Rapports PDF générés
+  pdf_out:       "reporting/output"
+
+storage:
+  fichier_quinzaines: "quinzaines.parquet"
+  fichier_meta:       "meta_projets.parquet"
+
+# LLM interne (Ollama par défaut — optionnel)
+# Laisser tel quel si vous n'utilisez pas le chat LLM
+llm:
+  endpoint:    "http://localhost:11434/v1"
+  model:       "mistral"
+  max_tokens:  1000
+  temperature: 0.2
+
+# Paramètres dashboard
+dashboard:
+  titre:       "Monitoring Projets"
+  organisation: "Mon Organisation"
