@@ -279,26 +279,37 @@ class RagEngine:
         Retourne un dict { question: réponse } prêt à être injecté en JSON.
         """
         qs = questions or QUESTIONS_STANDARD
-        q  = quinzaine or (self.sm.lister_quinzaines() or [""])[-1]
+
+        # Si quinzaine = None → génère pour TOUTES les quinzaines disponibles
+        # Cela permet au sélecteur de quinzaine du dashboard d'avoir des réponses pour chaque période
+        quinzaines_cibles = [quinzaine] if quinzaine else self.sm.lister_quinzaines()
+        if not quinzaines_cibles:
+            print("Aucune quinzaine disponible.")
+            return {}
 
         cache = {}
-        total = len(qs)
+        total = len(qs) * len(quinzaines_cibles)
+        n = 0
 
-        print(f"\nPré-génération LLM — {total} questions — quinzaine : {q}")
+        for q in quinzaines_cibles:
+            print(f"\nPré-génération LLM — {len(qs)} questions — quinzaine : {q}")
+            print("-" * 55)
+            for question in qs:
+                n += 1
+                print(f"[{n}/{total}] {q} / {question[:50]}...")
+                try:
+                    reponse = self.query(question, quinzaine=q)
+                    # Clé double : avec et sans préfixe quinzaine
+                    # Le JS essaie d'abord "Q1_2025_S1:question" puis "question" en fallback
+                    cache[f"{q}:{question.lower().strip()}"] = reponse
+                    cache[question.lower().strip()] = reponse  # fallback sans quinzaine
+                    print(f"       → {reponse[:80]}...")
+                except Exception as e:
+                    cache[f"{q}:{question.lower().strip()}"] = f"[Erreur : {e}]"
+                    log.error(f"Erreur pré-génération '{question}' ({q}) : {e}")
+
         print("-" * 55)
-
-        for i, question in enumerate(qs, 1):
-            print(f"[{i}/{total}] {question[:60]}...")
-            try:
-                reponse = self.query(question, quinzaine=q)
-                cache[question.lower().strip()] = reponse
-                print(f"       → {reponse[:80]}...")
-            except Exception as e:
-                cache[question.lower().strip()] = f"[Erreur : {e}]"
-                log.error(f"Erreur pré-génération '{question}' : {e}")
-
-        print("-" * 55)
-        print(f"Cache LLM généré : {len(cache)} réponses\n")
+        print(f"Cache LLM généré : {len(cache)} entrées ({len(quinzaines_cibles)} quinzaine(s))\n")
         return cache
 
     def tester_connexion(self) -> bool:

@@ -375,7 +375,7 @@ class PdfBuilder:
             log.error(f"Aucune donnée pour la quinzaine '{q}'")
             return None
 
-        chemin = self.dossier / f"rapport_{q}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        chemin = self.dossier / f"quinzaine_{q}.pdf"  # nom stable = trouvable par le dashboard JS
         doc    = self._doc(chemin)
         st     = _styles()
         story  = []
@@ -460,7 +460,7 @@ class PdfBuilder:
             return None
 
         nom = df["projet_nom"].iloc[0] if "projet_nom" in df.columns else projet_id
-        chemin = self.dossier / f"rapport_{projet_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        chemin = self.dossier / f"projet_{projet_id}.pdf"
         doc    = self._doc(chemin)
         st     = _styles()
         story  = []
@@ -562,7 +562,7 @@ class PdfBuilder:
             log.error(f"Impossible de comparer {q_avant} et {q_apres}")
             return None
 
-        chemin = self.dossier / f"delta_{q_avant}_{q_apres}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+        chemin = self.dossier / f"delta_{q_avant}_vs_{q_apres}.pdf"
         doc    = self._doc(chemin)
         st     = _styles()
         story  = []

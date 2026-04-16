@@ -20,13 +20,19 @@ storage:
   fichier_quinzaines: "quinzaines.parquet"
   fichier_meta:       "meta_projets.parquet"
 
-# LLM interne (Ollama par défaut — optionnel)
-# Laisser tel quel si vous n'utilisez pas le chat LLM
+# LLM — API Qwen (DashScope)
+# Remplis api_key avec ta clé, le reste est prêt à l'emploi
 llm:
-  endpoint:    "http://localhost:11434/v1"
-  model:       "mistral"
+  api_key:     ""                          # ← Ta clé API Qwen ici (obligatoire)
+  base_url:    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+  model:       "qwen-plus"                 # ou qwen-turbo, qwen-max ...
   max_tokens:  1000
   temperature: 0.2
+
+# Modèles Qwen disponibles (du plus rapide au plus puissant) :
+#   qwen-turbo  → rapide, économique
+#   qwen-plus   → bon équilibre (recommandé)
+#   qwen-max    → plus puissant, plus lent
 
 # Paramètres dashboard
 dashboard:
