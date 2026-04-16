@@ -290,14 +290,15 @@ def generer_html(donnees: dict, llm_cache: dict | None = None) -> str:
     data_js = json.dumps(donnees, ensure_ascii=False)
     llm_js  = json.dumps(llm_cache or {}, ensure_ascii=False)
 
-    return f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Project Intelligence — {donnees.get('quinzaine','')}</title>
-<style>{CSS}</style>
-</head>
+    quinzaine_titre = donnees.get('quinzaine', '')
+    head = (
+        '<!DOCTYPE html>\n<html lang="fr">\n<head>\n'
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        f'<title>Project Intelligence — {quinzaine_titre}</title>\n'
+        '<style>' + CSS + '</style>\n</head>'
+    )
+    return head + f"""
 <body>
 <div class="shell">
   <aside class="sidebar">
@@ -408,20 +409,8 @@ function switchQuinzaine(q){{
     sel.appendChild(opt);
   }});
 
-  // Boutons alignés exactement sur les clés du cache LLM (QUESTIONS_STANDARD dans rag_engine.py)
-  const qsChat=[
-    "résume l\'avancement global de la quinzaine",
-    "quels projets sont en retard ?",
-    "quels projets sont à risque ?",
-    "quelles décisions ont été prises ?",
-    "y a-t-il des blocages actifs ?",
-    "quelles actions sont à mener en priorité ?",
-    "quel est le projet le plus en difficulté ?"
-  ];
-  const qsLabels=[
-    "Résumé global","En retard","À risque","Décisions","Blocages","Actions prioritaires","En difficulté"
-  ];
-  document.getElementById("chat-qs").innerHTML=qsChat.map((q,i)=>`<button class="chat-q" onclick="askChat('${{q}}')">${{qsLabels[i]}}</button>`).join("");
+  const qsChat=["Résumé de la quinzaine","Projets en retard ?","Risques actifs ?","Décisions prises ?","Blocages ?"];
+  document.getElementById("chat-qs").innerHTML=qsChat.map(q=>`<button class="chat-q" onclick="askChat('${{q}}')">${{q}}</button>`).join("");
   document.querySelectorAll(".nav-item[data-page]").forEach(el=>{{
     el.addEventListener("click",()=>{{
       document.querySelectorAll(".nav-item").forEach(n=>n.classList.remove("active"));
@@ -561,23 +550,6 @@ function renderEvolutions(){{
 }}
 
 function askChat(q){{document.getElementById("chat-input").value=q;sendChat();}}
-function llmLookup(q){{
-  // 1. Correspondance exacte sur la quinzaine active
-  const key=DATA.quinzaine+":"+q.toLowerCase().trim();
-  if(LLM[key])return LLM[key];
-  // 2. Correspondance exacte sans préfixe quinzaine (cache généré sans préfixe)
-  const plain=q.toLowerCase().trim();
-  if(LLM[plain])return LLM[plain];
-  // 3. Recherche floue : trouve la clé du cache qui contient le plus de mots de la question
-  const words=plain.split(/\s+/).filter(w=>w.length>3);
-  let best=null,bestScore=0;
-  for(const[k,v] of Object.entries(LLM)){{
-    const score=words.filter(w=>k.includes(w)).length;
-    if(score>bestScore){{bestScore=score;best=v;}}
-  }}
-  if(bestScore>=2)return best;
-  return null;
-}}
 function sendChat(){{
   const input=document.getElementById("chat-input");const q=input.value.trim();if(!q)return;
   const msgs=document.getElementById("chat-msgs");const btn=document.querySelector(".chat-send");
@@ -587,10 +559,8 @@ function sendChat(){{
   msgs.innerHTML+=`<div class="msg" id="${{pid}}"><div class="msg-av">AI</div><div class="bubble" style="color:#9ca3af">Analyse…</div></div>`;
   msgs.scrollTop=msgs.scrollHeight;
   setTimeout(()=>{{
-    const cached=llmLookup(q);
-    const r=cached||repondreLocal(q);
-    const src=cached?"":"<span style=\"font-size:10px;color:#9ca3af;display:block;margin-top:6px\">⚡ Réponse locale — LLM non activé</span>";
-    document.getElementById(pid).querySelector(".bubble").innerHTML=r.replace(/\n/g,"<br>").replace(/\\n/g,"<br>")+src;
+    const r=LLM[q.toLowerCase().trim()]||repondreLocal(q);
+    document.getElementById(pid).querySelector(".bubble").innerHTML=r.replace(/\\n/g,"<br>");
     btn.disabled=false;msgs.scrollTop=msgs.scrollHeight;
   }},300);
 }}
