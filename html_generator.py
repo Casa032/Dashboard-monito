@@ -290,17 +290,14 @@ def generer_html(donnees: dict, llm_cache: dict | None = None) -> str:
     data_js = json.dumps(donnees, ensure_ascii=False)
     llm_js  = json.dumps(llm_cache or {}, ensure_ascii=False)
 
-    quinzaine_titre = donnees.get('quinzaine', '')
-    # CSS injecté par concaténation (pas dans la f-string) pour éviter les conflits avec les { } CSS
-    head = (
-        "<!DOCTYPE html>\n<html lang=\"fr\">\n<head>\n"
-        "<meta charset=\"UTF-8\">\n"
-        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-        f"<title>Project Intelligence — {quinzaine_titre}</title>\n"
-        "<style>" + CSS + "</style>\n</head>"
-    )
-    return head + f"""
-<body>
+    return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Project Intelligence — {donnees.get('quinzaine','')}</title>
+<style>{CSS}</style>
+</head>
 <body>
 <div class="shell">
   <aside class="sidebar">
@@ -328,10 +325,7 @@ def generer_html(donnees: dict, llm_cache: dict | None = None) -> str:
       <span class="snap-info" id="snap-info"></span>
       <div class="spacer"></div>
       <span class="gen-at" id="gen-at"></span>
-      <div style="display:flex;gap:6px;align-items:center">
-        <button class="btn-pdf" onclick="window.print()" title="Impression navigateur / PDF via Ctrl+P">🖨 Imprimer</button>
-        <button class="btn-pdf" id="btn-pdf-dl" style="background:#10b981" title="Télécharger le rapport PDF généré par pdf_builder.py">⬇ Rapport PDF</button>
-      </div>
+      <button class="btn-pdf" onclick="window.print()">Imprimer / PDF</button>
     </div>
     <div class="content">
       <div class="page active" id="page-overview"></div>
@@ -376,7 +370,7 @@ let selCollab=null;
 function esc(s){{return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}}
 function badge(st){{return`<span class="badge b${{st}}">${{SL[st]||st||"—"}}</span>`;}}
 function domColor(d){{const ds=[...new Set(DATA.projets.map(p=>p.domaine).filter(Boolean))].sort();return TC[ds.indexOf(d)%TC.length];}}
-function initials(n){{const pts=(n||"??").trim().split(" ").filter(Boolean);return pts.map(w=>w[0]).join("").toUpperCase().slice(0,2)||"??";}}
+function initials(n){{return(n||"??").split(/\s+/).map(w=>w[0]).join("").toUpperCase().slice(0,2);}}
 function avStyle(n){{const c=[["#dbeafe","#1d4ed8"],["#d1fae5","#065f46"],["#ede9fe","#5b21b6"],["#fef3c7","#b45309"],["#fce7f3","#9d174d"],["#e0f2fe","#0369a1"]];const[bg,fg]=c[(n||"X").charCodeAt(0)%c.length];return`background:${{bg}};color:${{fg}}`;}}
 function projItem(p){{const col=SC[p.statut]||"#9ca3af";return`<div class="proj-item" onclick="openModal('${{esc(p.projet_id)}}')"><span class="proj-dot" style="background:${{col}}"></span><span class="proj-name" title="${{esc(p.projet_nom)}}">${{esc(p.projet_nom)}}</span>${{badge(p.statut)}}<span class="proj-pct">${{p.avancement_pct||0}}%</span><span class="proj-resp">${{esc(p.responsable_principal||"")}}</span></div>`;}}
 
@@ -414,20 +408,16 @@ function switchQuinzaine(q){{
     sel.appendChild(opt);
   }});
 
-  // Boutons alignés exactement sur les clés du cache LLM (QUESTIONS_STANDARD dans rag_engine.py)
   const qsChat=[
-    "résume l\'avancement global de la quinzaine",
-    "quels projets sont en retard ?",
-    "quels projets sont à risque ?",
-    "quelles décisions ont été prises ?",
-    "y a-t-il des blocages actifs ?",
-    "quelles actions sont à mener en priorité ?",
-    "quel est le projet le plus en difficulté ?"
+    ["r\u00e9sume l'avancement global de la quinzaine", "R\u00e9sum\u00e9 global"],
+    ["quels projets sont en retard ?",                   "En retard"],
+    ["quels projets sont \u00e0 risque ?",              "\u00c0 risque"],
+    ["quelles d\u00e9cisions ont \u00e9t\u00e9 prises ?", "D\u00e9cisions"],
+    ["y a-t-il des blocages actifs ?",                   "Blocages"],
+    ["quelles actions sont \u00e0 mener en priorit\u00e9 ?", "Actions prioritaires"],
+    ["quel est le projet le plus en difficult\u00e9 ?", "En difficult\u00e9"],
   ];
-  const qsLabels=[
-    "Résumé global","En retard","À risque","Décisions","Blocages","Actions prioritaires","En difficulté"
-  ];
-  document.getElementById("chat-qs").innerHTML=qsChat.map((q,i)=>`<button class="chat-q" onclick="askChat('${{q}}')">${{qsLabels[i]}}</button>`).join("");
+  document.getElementById("chat-qs").innerHTML=qsChat.map(([q,label])=>`<button class="chat-q" onclick="askChat('${{q}}')">${{label}}</button>`).join("");
   document.querySelectorAll(".nav-item[data-page]").forEach(el=>{{
     el.addEventListener("click",()=>{{
       document.querySelectorAll(".nav-item").forEach(n=>n.classList.remove("active"));
@@ -440,31 +430,6 @@ function switchQuinzaine(q){{
   }});
   document.getElementById("modal-overlay").addEventListener("click",e=>{{if(e.target===document.getElementById("modal-overlay"))closeModal();}});
   renderOverview();renderDomaines();renderCollabs();renderEvolutions();
-
-  // Bouton téléchargement rapport PDF (généré par pdf_builder.py via run_pipeline.py --pdf)
-  document.getElementById("btn-pdf-dl").addEventListener("click", function(){{
-    // Cherche un PDF dans le même dossier que ce dashboard
-    // Le nom suit la convention de pdf_builder : quinzaine_XXXX.pdf
-    const q=DATA.quinzaine.replace(/[^a-zA-Z0-9_-]/g,"_");
-    // Essaie d'abord le chemin relatif ../reporting/output/
-    const candidates=[
-      `../reporting/output/quinzaine_${{q}}.pdf`,
-      `reporting/output/quinzaine_${{q}}.pdf`,
-      `quinzaine_${{q}}.pdf`,
-    ];
-    let found=false;
-    function tryNext(i){{
-      if(i>=candidates.length){{
-        if(!found)alert("Rapport PDF non trouvé.\n\nGénère-le d\'abord avec :\npython run_pipeline.py --pdf\n\nOu utilise le bouton Imprimer pour un PDF via le navigateur.");
-        return;
-      }}
-      fetch(candidates[i],{{method:"HEAD"}}).then(r=>{{
-        if(r.ok){{found=true;window.open(candidates[i],"_blank");}}
-        else tryNext(i+1);
-      }}).catch(()=>tryNext(i+1));
-    }}
-    tryNext(0);
-  }});
 }})();
 
 function openModal(pid){{
@@ -592,46 +557,105 @@ function renderEvolutions(){{
 }}
 
 function askChat(q){{document.getElementById("chat-input").value=q;sendChat();}}
-function llmLookup(q){{
-  // 1. Correspondance exacte sur la quinzaine active
-  const key=DATA.quinzaine+":"+q.toLowerCase().trim();
-  if(LLM[key])return LLM[key];
-  // 2. Correspondance exacte sans préfixe quinzaine (cache généré sans préfixe)
-  const plain=q.toLowerCase().trim();
-  if(LLM[plain])return LLM[plain];
-  // 3. Recherche floue : trouve la clé du cache qui contient le plus de mots de la question
-  const words=plain.split(" ").filter(w=>w.length>3);
-  let best=null,bestScore=0;
-  for(const[k,v] of Object.entries(LLM)){{
-    const score=words.filter(w=>k.includes(w)).length;
-    if(score>bestScore){{bestScore=score;best=v;}}
-  }}
-  if(bestScore>=2)return best;
-  return null;
+
+// URL de l'API — modifiable via attribut data-api sur le body, ou variable globale
+// Ex : <body data-api="http://localhost:8000"> ou window.CHAT_API_URL = "..."
+function getChatApiUrl(){{
+  return window.CHAT_API_URL
+    || document.body.dataset.api
+    || "http://localhost:8000";
 }}
-function sendChat(){{
-  const input=document.getElementById("chat-input");const q=input.value.trim();if(!q)return;
-  const msgs=document.getElementById("chat-msgs");const btn=document.querySelector(".chat-send");
+
+async function sendChat(){{
+  const input=document.getElementById("chat-input");
+  const q=input.value.trim();if(!q)return;
+  const msgs=document.getElementById("chat-msgs");
+  const btn=document.querySelector(".chat-send");
+
+  // Afficher le message utilisateur
   msgs.innerHTML+=`<div class="msg user"><div class="msg-av">Toi</div><div class="bubble">${{esc(q)}}</div></div>`;
   input.value="";btn.disabled=true;msgs.scrollTop=msgs.scrollHeight;
+
+  // Bulle de chargement
   const pid=`msg-${{Date.now()}}`;
-  msgs.innerHTML+=`<div class="msg" id="${{pid}}"><div class="msg-av">AI</div><div class="bubble" style="color:#9ca3af">Analyse…</div></div>`;
+  msgs.innerHTML+=`<div class="msg" id="${{pid}}"><div class="msg-av">AI</div><div class="bubble" style="color:#9ca3af;font-style:italic">Analyse en cours…</div></div>`;
   msgs.scrollTop=msgs.scrollHeight;
-  setTimeout(()=>{{
-    const cached=llmLookup(q);
-    const r=cached||repondreLocal(q);
-    const src=cached?"":"<span style=\"font-size:10px;color:#9ca3af;display:block;margin-top:6px\">⚡ Réponse locale — LLM non activé</span>";
-    document.getElementById(pid).querySelector(".bubble").innerHTML=r.replace(/\n/g,"<br>").replace(/\\n/g,"<br>")+src;
+
+  // 1. Vérifier le cache LLM pré-généré (correspondance exacte)
+  const cacheKey=DATA.quinzaine+":"+q.toLowerCase().trim();
+  const cached=LLM[cacheKey]||LLM[q.toLowerCase().trim()];
+  if(cached){{
+    _afficherReponse(pid,cached);
     btn.disabled=false;msgs.scrollTop=msgs.scrollHeight;
-  }},300);
+    return;
+  }}
+
+  // 2. Appel à l'API /api/chat
+  try{{
+    const apiUrl=getChatApiUrl();
+    const resp=await fetch(apiUrl+"/api/chat",{{
+      method:"POST",
+      headers:{{"Content-Type":"application/json"}},
+      body:JSON.stringify({{
+        question: q,
+        quinzaine: DATA.quinzaine
+      }}),
+      signal: AbortSignal.timeout(30000)   // timeout 30s
+    }});
+
+    if(!resp.ok)throw new Error("HTTP "+resp.status);
+    const data=await resp.json();
+    // Accepte {{reponse:...}} ou {{response:...}} ou {{answer:...}} ou texte brut
+    const texte=data.reponse||data.response||data.answer||data.message||JSON.stringify(data);
+    _afficherReponse(pid,texte);
+
+  }}catch(err){{
+    // 3. Fallback local si l'API est inaccessible
+    console.warn("API /api/chat inaccessible, fallback local :",err.message);
+    const fallback=repondreLocal(q);
+    const avertissement=`<span style="font-size:10px;color:#f59e0b;display:block;margin-bottom:6px">⚠ API indisponible — réponse locale</span>`;
+    _afficherReponse(pid, avertissement+fallback);
+  }}
+
+  btn.disabled=false;msgs.scrollTop=msgs.scrollHeight;
 }}
+
+function _afficherReponse(pid,texte){{
+  const bulle=document.getElementById(pid)?.querySelector(".bubble");
+  if(bulle)bulle.innerHTML=String(texte).replace(/\\n/g,"<br>");
+}}
+
 function repondreLocal(q){{
   const ql=q.toLowerCase();const P=DATA.projets;const k=DATA.kpis;
-  if(/retard|late/.test(ql)){{const r=P.filter(p=>p.statut==="LATE");return r.length?r.length+" projet(s) en retard :\\n"+r.map(p=>"- "+p.projet_nom+" ("+( p.responsable_principal||"?")+")"+(p.points_blocage?" : "+p.points_blocage:"")).join("\\n"):"Aucun projet en retard sur "+DATA.quinzaine+".";}}
-  if(/risque|at_risk/.test(ql)){{const r=P.filter(p=>p.statut==="AT_RISK");return r.length?r.length+" projet(s) à risque :\\n"+r.map(p=>"- "+p.projet_nom+" : "+(p.risques||"non précisé")).join("\\n"):"Aucun projet à risque.";}}
-  if(/décision|decision/.test(ql)){{const r=P.filter(p=>p.decisions&&p.decisions.trim());return r.length?"Décisions sur "+DATA.quinzaine+" :\\n"+r.map(p=>"- "+p.projet_nom+" : "+p.decisions).join("\\n"):"Aucune décision enregistrée.";}}
-  if(/blocage|bloqu/.test(ql)){{const r=P.filter(p=>p.points_blocage&&p.points_blocage.trim());return r.length?"Blocages actifs :\\n"+r.map(p=>"- "+p.projet_nom+" : "+p.points_blocage).join("\\n"):"Aucun blocage signalé.";}}
-  return"Résumé "+DATA.quinzaine+" :\\n- "+k.nb_projets_actifs+" projets actifs\\n- "+k.nb_en_retard+" en retard · "+k.nb_at_risk+" à risque\\n- Avancement moyen : "+k.avancement_moyen+"%\\n- "+k.nb_decisions+" décision(s) · "+k.nb_blocages+" blocage(s)";
+  if(/retard|late/.test(ql)){{
+    const r=P.filter(p=>p.statut==="LATE");
+    return r.length?r.length+" projet(s) en retard :\\n"+r.map(p=>"- "+p.projet_nom+" ("+(p.responsable_principal||"?")+")"+(p.points_blocage?" : "+p.points_blocage:"")).join("\\n"):"Aucun projet en retard sur "+DATA.quinzaine+".";
+  }}
+  if(/risque|at_risk/.test(ql)){{
+    const r=P.filter(p=>p.statut==="AT_RISK");
+    return r.length?r.length+" projet(s) à risque :\\n"+r.map(p=>"- "+p.projet_nom+" : "+(p.risques||"non précisé")).join("\\n"):"Aucun projet à risque.";
+  }}
+  if(/décision|decision/.test(ql)){{
+    const r=P.filter(p=>p.decisions&&p.decisions.trim());
+    return r.length?"Décisions sur "+DATA.quinzaine+" :\\n"+r.map(p=>"- "+p.projet_nom+" : "+p.decisions).join("\\n"):"Aucune décision enregistrée.";
+  }}
+  if(/blocage|bloqu/.test(ql)){{
+    const r=P.filter(p=>p.points_blocage&&p.points_blocage.trim());
+    return r.length?"Blocages actifs :\\n"+r.map(p=>"- "+p.projet_nom+" : "+p.points_blocage).join("\\n"):"Aucun blocage signalé.";
+  }}
+  if(/priorit|action/.test(ql)){{
+    const r=P.filter(p=>p.actions_a_mener&&p.actions_a_mener.trim());
+    return r.length?"Actions à mener :\\n"+r.map(p=>"- "+p.projet_nom+" : "+p.actions_a_mener+(p.actions_echeance?" (échéance : "+p.actions_echeance+")":"")).join("\\n"):"Aucune action enregistrée.";
+  }}
+  if(/avanc|progress|résumé|resume/.test(ql)){{
+    return"Résumé "+DATA.quinzaine+" :\\n- "+k.nb_projets_actifs+" projets actifs\\n- "+k.nb_en_retard+" en retard · "+k.nb_at_risk+" à risque\\n- Avancement moyen : "+k.avancement_moyen+"%\\n- "+k.nb_decisions+" décision(s) · "+k.nb_blocages+" blocage(s)";
+  }}
+  // Recherche par nom de projet
+  const match=P.find(p=>p.projet_nom&&ql.includes(p.projet_nom.toLowerCase()));
+  if(match){{
+    return match.projet_nom+" :\\n- Statut : "+({{ON_TRACK:"En cours",AT_RISK:"À risque",LATE:"En retard",DONE:"Terminé",ON_HOLD:"En pause"}}[match.statut]||match.statut)+"\\n- Avancement : "+(match.avancement_pct||0)+"%\\n- Responsable : "+(match.responsable_principal||"?")+(match.risques?"\\n- Risques : "+match.risques:"")+(match.points_blocage?"\\n- Blocages : "+match.points_blocage:"");
+  }}
+  return"Résumé "+DATA.quinzaine+" :\\n- "+k.nb_projets_actifs+" projets actifs\\n- "+k.nb_en_retard+" en retard · "+k.nb_at_risk+" à risque\\n- Avancement moyen : "+k.avancement_moyen+"%\\n- "+k.nb_decisions+" décision(s) · "+k.nb_blocages+" blocage(s)\\n\\n(Connecte le serveur API pour des réponses complètes.)";
 }}
 </script>
 </body>
