@@ -1,0 +1,63 @@
+# ============================================================
+# config.yaml — Project Intelligence
+# ============================================================
+# Adapte les chemins à ton environnement avant de lancer.
+# Lancement : python run_pipeline.py
+# ============================================================
+
+# ── Chemins ──────────────────────────────────────────────────
+paths:
+  # Dossier contenant les fiches individuelles (réseau ou local)
+  # Exemples :
+  #   Linux/Mac  : /mnt/serveur/Monitoring/Fiches_individuelles
+  #   Windows    : \\\\serveur\\partage\\Monitoring\\Fiches_individuelles
+  #   Local      : Monitoring/Fiches_individuelles
+  fiches_individuelles: Monitoring/Fiches_individuelles
+
+  # Stockage Parquet intermédiaire (local, créé automatiquement)
+  parquet_dir: storage/parquet
+
+  # Dashboard HTML généré
+  dashboard_out: frontend/dashboard.html
+
+# ── Quinzaine ─────────────────────────────────────────────────
+# Laisse vide pour déduire automatiquement depuis la date du jour.
+# Format : T[1-4]_[année]_R[1-6]  ex: T1_2026_R2
+# Si renseigné, cette quinzaine sera toujours relue (courante).
+quinzaine_courante:   # ex: T1_2026_R2
+
+# ── Stockage Parquet ──────────────────────────────────────────
+storage:
+  # Fichier consolidé (toutes quinzaines)
+  fichier_quinzaines: quinzaines.parquet
+  # Fichier META (référentiel projets)
+  fichier_meta:       meta_projets.parquet
+
+# ── LLM ──────────────────────────────────────────────────────
+llm:
+  # URL de l'API LLM (compatible OpenAI)
+  # Exemples :
+  #   Qwen interne  : https://litellm.monserveur.gpu.paas/
+  #   OpenAI        : https://api.openai.com/v1
+  #   Ollama local  : http://localhost:11434/v1
+  base_url: https://litellm.cofidis.gpu.paas-skpn.com/
+
+  # Clé API — ne pas commiter en clair, utilise une variable d'env :
+  #   api_key: ${LLM_API_KEY}
+  api_key: ""
+
+  # Modèle à utiliser
+  model: Qwen/Qwen2.5-Coder-32B-Instruct
+
+  # Paramètres de génération
+  max_tokens:  1500
+  temperature: 0.2
+
+# ── API FastAPI (/api/chat) ───────────────────────────────────
+api:
+  host: 0.0.0.0
+  port: 5004
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level: INFO   # DEBUG pour plus de détails

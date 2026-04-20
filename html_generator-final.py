@@ -471,9 +471,9 @@ function switchQuinzaine(q){{
 }})();
 
 function renderOverview(){{
-  const k=DATA.kpis;const P=DATA.projets;
-  const maxD=Math.max(...Object.values(DATA.par_domaine).map(d=>d.total),1);
-  const maxR=Math.max(...Object.values(DATA.par_resp).map(r=>r.total),1);
+  const k=DATA.kpis||{{}};const P=DATA.projets||[];
+  const maxD=Object.values(DATA.par_domaine||{{}}).length?Math.max(...Object.values(DATA.par_domaine).map(d=>d.total),1):1;
+  const maxR=Object.values(DATA.par_resp||{{}}).length?Math.max(...Object.values(DATA.par_resp).map(r=>r.total),1):1;
   const top=[...P].sort((a,b)=>({{"LATE":0,"AT_RISK":1,"ON_TRACK":2,"ON_HOLD":3,"DONE":4}}[a.statut]||9)-({{"LATE":0,"AT_RISK":1,"ON_TRACK":2,"ON_HOLD":3,"DONE":4}}[b.statut]||9)).slice(0,10);
   const alertes=P.filter(p=>p.statut==="LATE"||p.statut==="AT_RISK"||p.points_blocage);
   document.getElementById("page-overview").innerHTML=`
