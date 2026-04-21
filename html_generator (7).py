@@ -1,3 +1,56 @@
+# --- SEULE PARTIE MODIFIÉE : generer_html ---
+
+def generer_html(donnees, llm_cache=None):
+    data_js = json.dumps(donnees, ensure_ascii=False)
+    llm_js  = json.dumps(llm_cache or {}, ensure_ascii=False)
+    q_label = donnees.get("quinzaine", "")
+
+    head = (
+        '<!DOCTYPE html>\n<html lang="fr">\n<head>\n'
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width,initial-scale=1.0">\n'
+        f'<title>DATA_MONITOR :: {q_label}</title>\n'
+        '<style>' + CSS + '</style>\n</head>\n<body>'
+    )
+
+    html = """
+<script id="data-json" type="application/json">
+""" + data_js + """
+</script>
+
+<script id="llm-json" type="application/json">
+""" + llm_js + """
+</script>
+
+<div class="shell">
+  <!-- (tout ton HTML inchangé ici) -->
+</div>
+
+<script>
+
+// ✅ FIX CRITIQUE ICI
+const DATA = JSON.parse(document.getElementById("data-json").textContent);
+const LLM  = JSON.parse(document.getElementById("llm-json").textContent);
+
+// --- LE RESTE DU JS EST STRICTEMENT IDENTIQUE ---
+// (tu ne touches à rien en dessous)
+
+const PALETTE=["#00d4ff","#10d994","#8b5cf6","#f59e0b","#f43f5e","#a855f7","#06b6d4","#84cc16","#fb923c","#e879f9"];
+const SC={ON_TRACK:"#10d994",AT_RISK:"#f59e0b",LATE:"#f43f5e",DONE:"#8b5cf6",ON_HOLD:"#475569"};
+
+// ⚠️ GARDE EXACTEMENT TON JS ORIGINAL ICI
+// renderOverview, renderDomaines, renderGantt, buildGantt, etc.
+// → AUCUNE MODIF NÉCESSAIRE
+
+</script>
+</body>
+</html>
+"""
+    return head + html
+
+
+
+
 """
 html_generator.py
 =================
