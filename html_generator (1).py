@@ -1,3 +1,43 @@
+
+paths:
+  dashboard_out: frontend/dashboard.html
+  pdf_out: reporting/output          # ← ajouter cette ligne
+
+***
+# ── AVANT (ce que tu as déjà) ──
+from frontend.html_generator import generer_dashboard
+
+chemin_html = generer_dashboard(
+    config_path=args.config,
+    quinzaine=args.quinzaine,
+)
+
+# ── AJOUTER après ──
+from reporting.pdf_builder import PdfBuilder
+
+builder = PdfBuilder(args.config)
+
+# PDF quinzaine (toujours généré)
+builder.rapport_quinzaine(args.quinzaine)
+
+# PDF delta (si quinzaine précédente existe)
+quinzaines = sm.lister_quinzaines()
+if len(quinzaines) >= 2:
+    idx = quinzaines.index(q_active)
+    if idx > 0:
+        builder.rapport_delta(quinzaines[idx - 1], q_active)
+
+**
+parser.add_argument("--pdf", action="store_true",
+                    help="Génère aussi les rapports PDF")
+
+**
+
+if args.pdf:
+    from reporting.pdf_builder import PdfBuilder
+    builder = PdfBuilder(args.config)
+    builder.rapport_quinzaine(args.quinzaine)
+    
 """
 html_generator.py
 =================
