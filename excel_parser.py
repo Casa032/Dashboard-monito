@@ -1,239 +1,487 @@
 """
 excel_parser.py
 ===============
-Lit le fichier Excel de monitoring (monito.xlsx) et charge
-les données en Parquet via StorageManager.
+Lecture des fiches individuelles Excel et consolidation vers Parquet.
 
-Rôle dans le pipeline :
-    monito.xlsx → excel_parser.py → storage.py → query/ + reporting/
+Structure attendue dans chaque fiche :
+    - Feuille META       : infos statiques du projet (ref_sujet, sujet, domaine, etc.)
+    - Feuilles quinzaine : T1_2026_R1, T2_2026_R3, etc. (pattern T[1-4]_20XX_R[1-6])
+    - Feuilles ignorées  : TEMPLATE, DICTIONNAIRE, et tout ce qui ne matche pas le pattern
 
-Structure attendue du fichier Excel :
-    - Une sheet "META"       : référentiel des projets
-    - Une sheet par quinzaine: données de suivi (ex: Q1_2025_S1)
-    - Sheets ignorées        : DICTIONNAIRE, TEMPLATE, NOTES
+Stratégie incrémentale :
+    - Quinzaines passées → Parquet figé, jamais relu sauf si --force
+    - Quinzaine courante → toujours relue (saisie encore en cours)
 
-Note : la validation des données est assurée par Excel (listes déroulantes).
-Ce module lit et fait confiance aux données sans re-valider.
+Stratégie de fusion pour projets partagés :
+    - Champs autoritatifs (statut, avancement_pct) → valeur du responsable_principal
+    - Champs libres (points_blocage, decisions, commentaire_libre, risques,
+      actions_a_mener, livrable_quinzaine, livrable_statut, actions_realises)
+      → concaténés avec préfixe [auteur]
+
+Usage :
+    python excel_parser.py                         # incrémental
+    python excel_parser.py --force                 # tout retraiter
+    python excel_parser.py --quinzaine T1_2026_R1  # une seule quinzaine
+    python excel_parser.py --config config.yaml
 """
 
-import pandas as pd
-import yaml
+import re
+import sys
 import logging
+import argparse
+import yaml
+import pandas as pd
 from pathlib import Path
+from datetime import datetime
 
 log = logging.getLogger(__name__)
 
-SHEETS_IGNOREES = {"META", "DICTIONNAIRE", "TEMPLATE", "NOTES"}
+# Pattern valide pour les feuilles quinzaine : T1_2026_R1 ... T4_2099_R6
+PATTERN_QUINZAINE = re.compile(r"^T[1-4]_\d{4}_R[1-6]$")
 
-# Colonnes attendues dans les sheets de quinzaine
-COLONNES_QUINZAINE = [
-    "projet_id", "projet_nom", "domaine", "phase", "effectifs",
-    "responsable_principal", "statut", "avancement_pct",
-    "livrable_quinzaine", "livrable_statut", "decisions",
-    "actions_a_mener", "actions_responsable", "actions_echeance",
-    "risques", "risque_niveau", "points_blocage", "commentaire_libre",
+# Colonnes attendues dans les feuilles quinzaine (ton dictionnaire)
+COLONNES_FEUILLE = [
+    "ref_sujet", "sujet", "phase", "statut", "avancement_pct",
+    "livrable_quinzaine", "livrable_statut",
+    "actions_realises", "actions_a_mener", "actions_echeance",
+    "charge_a_prevoir", "risques", "risque_niveau",
+    "points_blocage", "commentaire",
 ]
 
+# Colonnes attendues dans META
 COLONNES_META = [
-    "projet_id", "projet_nom", "domaine",
-    "date_debut", "date_fin_prevue", "budget_jours",
-    "client_interne", "description",
+    "type", "ref_sujet", "sujet", "domaine", "entite_concerne",
+    "effectifs", "responsable_principal",
+    "date_debut", "date_fin_prevue",
+    "priorite", "budget_jours", "description",
+]
+
+# Mapping vers les noms internes utilisés dans le dashboard et le RAG
+RENAME_FEUILLE = {
+    "sujet":             "projet_nom",
+    "ref_sujet":         "projet_id",
+    "commentaire":       "commentaire_libre",
+}
+
+RENAME_META = {
+    "sujet":     "projet_nom",
+    "ref_sujet": "projet_id",
+}
+
+# Champs dont la valeur du responsable_principal fait autorité
+CHAMPS_RESPONSABLE = [
+    "statut",
+    "avancement_pct",
+]
+
+# Champs libres concaténés avec préfixe [auteur] pour tous les contributeurs
+CHAMPS_CONCAT = [
+    "points_blocage",
+    "decisions",
+    "commentaire_libre",
+    "risques",
+    "actions_a_mener",
+    "livrable_quinzaine",
+    "livrable_statut",
+    "actions_realises",
 ]
 
 
-def _cfg(config_path="config.yaml") -> dict:
+def _charger_config(config_path: str) -> dict:
     p = Path(config_path)
-    return yaml.safe_load(p.read_text()) if p.exists() else {}
+    return yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else {}
 
 
-def _trouver_ligne_headers(ws_df: pd.DataFrame) -> int:
+def _quinzaine_courante(config: dict) -> str | None:
     """
-    Cherche la ligne contenant 'projet_id' dans le DataFrame brut.
-    Retourne l'index (0-based) ou -1 si introuvable.
-    Gère les cas où il y a un titre en ligne 1 avant les en-têtes.
+    Retourne la quinzaine courante depuis config.yaml.
+    Si non déclarée, la déduit de la date du jour.
+    Format : T[trimestre]_[année]_R[rang dans le trimestre]
+    Ex : T2_2026_R3
     """
-    for i, row in ws_df.iterrows():
-        if any(str(v).strip().lower() == "projet_id" for v in row if pd.notna(v)):
-            return i
-    return -1
+    q = config.get("quinzaine_courante")
+    if q:
+        return q
+    now = datetime.now()
+    trimestre = (now.month - 1) // 3 + 1
+    # Rang approximatif dans le trimestre selon le mois courant dans le trimestre
+    mois_dans_trim = (now.month - 1) % 3 + 1
+    rang = 1 if mois_dans_trim == 1 else (3 if mois_dans_trim == 2 else 5)
+    if now.day > 15:
+        rang += 1
+    rang = min(rang, 6)
+    return f"T{trimestre}_{now.year}_R{rang}"
 
 
-def lire_sheet(chemin: Path, sheet_name: str) -> pd.DataFrame:
-    """
-    Lit une sheet Excel et retourne un DataFrame propre.
-    Détecte automatiquement la ligne d'en-têtes (ignore le titre fusionné).
-    """
-    # header=None pour lire toutes les lignes brutes
-    df_brut = pd.read_excel(chemin, sheet_name=sheet_name, header=None, dtype=str)
-    df_brut = df_brut.fillna("")
+def _est_feuille_quinzaine(nom: str) -> bool:
+    return bool(PATTERN_QUINZAINE.match(nom))
 
-    idx_header = _trouver_ligne_headers(df_brut)
-    if idx_header == -1:
-        log.warning(f"Sheet '{sheet_name}' : colonne 'projet_id' introuvable — ignorée")
+
+def _lire_meta(wb_path: Path, xl: pd.ExcelFile) -> pd.DataFrame:
+    """
+    Lit la feuille META d'un fichier Excel.
+    Retourne un DataFrame avec les colonnes META normalisées.
+    Colonnes absentes → NaN, colonnes inconnues → ignorées.
+    """
+    if "META" not in xl.sheet_names:
+        log.warning(f"{wb_path.name} — pas de feuille META")
         return pd.DataFrame()
 
-    # Reconstruire avec les bonnes en-têtes
-    headers = df_brut.iloc[idx_header].tolist()
-    headers = [str(h).strip() for h in headers]
-    df = df_brut.iloc[idx_header + 1:].copy()
-    df.columns = headers
-    df = df.reset_index(drop=True)
+    try:
+        df = xl.parse("META", dtype=str)
+    except Exception as e:
+        log.error(f"{wb_path.name} — erreur lecture META : {e}")
+        return pd.DataFrame()
 
-    # Retirer les lignes vides et les lignes sans projet_id
-    df = df[df["projet_id"].str.strip() != ""].reset_index(drop=True)
+    # Normaliser les noms de colonnes (minuscules, strip)
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    # Garder uniquement les colonnes connues
+    cols_presentes = [c for c in COLONNES_META if c in df.columns]
+    df = df[cols_presentes].copy()
+
+    # Filtrer les lignes sans ref_sujet
+    if "ref_sujet" in df.columns:
+        df = df[df["ref_sujet"].notna() & (df["ref_sujet"].str.strip() != "")]
+
+    df = df.rename(columns=RENAME_META)
+    df["source_fichier"] = wb_path.name
+
+    log.debug(f"{wb_path.name} — META : {len(df)} projet(s)")
+    return df
+
+
+def _lire_feuille_quinzaine(wb_path: Path, xl: pd.ExcelFile,
+                             nom_feuille: str, responsable: str) -> pd.DataFrame:
+    """
+    Lit une feuille quinzaine d'un fichier Excel.
+    Enrichit chaque ligne avec le nom du responsable et la quinzaine.
+    Ajoute les colonnes de travail : fichier_source et est_responsable
+    (supprimées après fusion).
+    """
+    try:
+        df = xl.parse(nom_feuille, dtype=str)
+    except Exception as e:
+        log.error(f"{wb_path.name}/{nom_feuille} — erreur lecture : {e}")
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Normaliser les noms de colonnes
+    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+
+    # Filtrer les lignes sans ref_sujet (lignes vides / template)
+    if "ref_sujet" not in df.columns:
+        log.warning(f"{wb_path.name}/{nom_feuille} — colonne 'ref_sujet' absente")
+        return pd.DataFrame()
+
+    df = df[df["ref_sujet"].notna() & (df["ref_sujet"].str.strip() != "")].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    # Garder les colonnes connues + toute colonne présente
+    cols_presentes = [c for c in COLONNES_FEUILLE if c in df.columns]
+    df = df[cols_presentes].copy()
+
+    # Normalisation avancement_pct : 0-1 → 0-100
+    if "avancement_pct" in df.columns:
+        def _normaliser_pct(v):
+            try:
+                f = float(str(v).replace(",", ".").replace("%", "").strip())
+                return round(f * 100 if f <= 1.0 else f)
+            except (ValueError, TypeError):
+                return None
+        df["avancement_pct"] = df["avancement_pct"].apply(_normaliser_pct)
+
+    # Normalisation statut → majuscules avec underscore
+    if "statut" in df.columns:
+        STATUT_MAP = {
+            "en cours":   "ON_TRACK",
+            "a risque":   "AT_RISK",
+            "à risque":   "AT_RISK",
+            "en retard":  "LATE",
+            "terminé":    "DONE",
+            "termine":    "DONE",
+            "stand by":   "ON_HOLD",
+            "on hold":    "ON_HOLD",
+            "on_track":   "ON_TRACK",
+            "at_risk":    "AT_RISK",
+            "late":       "LATE",
+            "done":       "DONE",
+            "on_hold":    "ON_HOLD",
+        }
+        df["statut"] = df["statut"].apply(
+            lambda v: STATUT_MAP.get(str(v).strip().lower(), str(v).strip().upper()
+                                     if pd.notna(v) else "ON_TRACK")
+        )
+
+    df = df.rename(columns=RENAME_FEUILLE)
+    df["quinzaine"]             = nom_feuille
+    df["responsable_principal"] = responsable
+    df["source_fichier"]        = wb_path.stem   # ex: "luc", "jacques" — colonne de travail
+    df["est_responsable"]       = False           # sera mis à jour dans _fusionner_lignes
 
     return df
 
 
-def parser_excel(chemin_excel: str | Path, config_path="config.yaml") -> dict:
+def _fusionner_lignes(df_all: pd.DataFrame, meta_global: pd.DataFrame | None = None) -> pd.DataFrame:
     """
-    Parse le fichier Excel consolidé et retourne un dict avec :
-        - "quinzaines" : dict { nom_sheet: DataFrame }
-        - "meta"       : DataFrame (sheet META si présente)
-        - "erreurs"    : liste des problèmes rencontrés
-        - "stats"      : résumé chiffré
+    Fusionne les lignes dupliquées (même projet_id, même quinzaine)
+    issues de plusieurs fichiers contributeurs.
 
-    Usage :
-        from ingestion.excel_parser import parser_excel
-        resultat = parser_excel("data/monito.xlsx")
-        df_q1 = resultat["quinzaines"]["Q1_2025_S1"]
+    Règles :
+    - CHAMPS_RESPONSABLE : valeur du responsable_principal (META) en priorité,
+      sinon premier contributeur trouvé
+    - CHAMPS_CONCAT : toutes les valeurs non vides concaténées avec préfixe [auteur]
+    - Autres champs : valeur du responsable en priorité, sinon premier non-null
+
+    Les colonnes de travail (fichier_source, est_responsable) sont supprimées
+    avant retour.
     """
-    chemin = Path(chemin_excel)
-    resultat = {"quinzaines": {}, "meta": pd.DataFrame(), "erreurs": [], "stats": {}}
+    col_id = "projet_id" if "projet_id" in df_all.columns else "ref_sujet"
 
-    if not chemin.exists():
-        resultat["erreurs"].append(f"Fichier introuvable : {chemin}")
-        return resultat
+    # Récupérer la map projet_id → responsable_principal depuis META
+    resp_map = {}
+    if meta_global is not None and not meta_global.empty:
+        col_pid = "projet_id" if "projet_id" in meta_global.columns else "ref_sujet"
+        if col_pid in meta_global.columns and "responsable_principal" in meta_global.columns:
+            for _, row in meta_global.iterrows():
+                pid = str(row.get(col_pid, "")).strip()
+                resp = str(row.get("responsable_principal", "")).strip().lower()
+                if pid:
+                    resp_map[pid] = resp
 
-    # Lister les sheets du fichier
-    try:
-        xl = pd.ExcelFile(chemin)
-        sheets = xl.sheet_names
-    except Exception as e:
-        resultat["erreurs"].append(f"Impossible d'ouvrir le fichier : {e}")
-        return resultat
+    # Marquer est_responsable selon META
+    def _est_resp(row):
+        pid  = str(row.get(col_id, "")).strip()
+        src  = str(row.get("source_fichier", "")).strip().lower()
+        resp = resp_map.get(pid, "")
+        # Match si le nom du fichier source est contenu dans le responsable ou vice-versa
+        return bool(resp and (resp in src or src in resp))
 
-    log.info(f"Fichier : {chemin.name} — {len(sheets)} sheet(s) : {sheets}")
+    df_all = df_all.copy()
+    df_all["est_responsable"] = df_all.apply(_est_resp, axis=1)
 
-    nb_lignes_total = 0
+    groupes = []
 
-    for sheet_name in sheets:
-        # Sheet META
-        if sheet_name == "META":
-            try:
-                df_meta = lire_sheet(chemin, sheet_name)
-                if not df_meta.empty:
-                    resultat["meta"] = df_meta
-                    log.info(f"META — {len(df_meta)} projet(s)")
-            except Exception as e:
-                resultat["erreurs"].append(f"Erreur lecture META : {e}")
+    for (pid, quinzaine), groupe in df_all.groupby([col_id, "quinzaine"]):
+        if len(groupe) == 1:
+            # Pas de doublon — on garde tel quel
+            groupes.append(groupe.iloc[0].to_dict())
             continue
 
-        # Sheets à ignorer
-        if sheet_name in SHEETS_IGNOREES:
-            log.info(f"Sheet '{sheet_name}' ignorée")
-            continue
+        # Ligne de base : responsable en priorité, sinon première ligne
+        resp_rows = groupe[groupe["est_responsable"]]
+        base = (resp_rows.iloc[0] if not resp_rows.empty else groupe.iloc[0]).to_dict()
 
-        # Sheet de quinzaine
+        # Champs autoritatifs : déjà dans base (responsable ou premier)
+        # On s'assure juste que si un responsable existe, ses valeurs écrasent
+        if not resp_rows.empty:
+            for champ in CHAMPS_RESPONSABLE:
+                if champ in resp_rows.columns:
+                    v = resp_rows.iloc[0].get(champ)
+                    if pd.notna(v):
+                        base[champ] = v
+
+        # Champs libres : concaténer toutes les valeurs non vides
+        for champ in CHAMPS_CONCAT:
+            if champ not in groupe.columns:
+                continue
+            valeurs_prefixees = []
+            for _, row in groupe.iterrows():
+                v = str(row.get(champ, "") or "").strip()
+                if v and v.lower() not in ("nan", "none", "—", "-", ""):
+                    auteur = str(row.get("source_fichier", "?")).strip()
+                    valeurs_prefixees.append(f"[{auteur}] {v}")
+            base[champ] = " | ".join(valeurs_prefixees) if valeurs_prefixees else None
+
+        groupes.append(base)
+
+    df_fusionne = pd.DataFrame(groupes)
+
+    # Supprimer les colonnes de travail temporaires
+    for col_temp in ["fichier_source", "est_responsable"]:
+        if col_temp in df_fusionne.columns:
+            df_fusionne = df_fusionne.drop(columns=[col_temp])
+
+    return df_fusionne
+
+
+def _extraire_responsable(wb_path: Path) -> str:
+    """
+    Déduit le nom du responsable depuis le nom du fichier.
+    Ex : Fiches_Juno.xlsx → "Juno"
+         Fiches_Jean_Dupont.xlsx → "Jean Dupont"
+    """
+    stem = wb_path.stem  # sans extension
+    # Supprimer préfixe "Fiches_" ou "Fiche_" case-insensitive
+    stem = re.sub(r"(?i)^fiches?_", "", stem)
+    return stem.replace("_", " ").strip()
+
+
+def parser_fiches(
+    dossier_fiches: str | Path,
+    dossier_parquet: str | Path,
+    quinzaine_courante: str | None = None,
+    force: bool = False,
+    quinzaine_unique: str | None = None,
+) -> dict[str, int]:
+    """
+    Parcourt tous les fichiers Excel de dossier_fiches.
+    Pour chaque quinzaine détectée :
+        - Si Parquet existe et quinzaine != courante → skip (incrémental)
+        - Sinon → lit, fusionne les projets partagés, sauvegarde Parquet
+    Retourne un dict {quinzaine: nb_lignes_écrites}.
+    """
+    dossier_fiches  = Path(dossier_fiches)
+    dossier_parquet = Path(dossier_parquet)
+    dossier_parquet.mkdir(parents=True, exist_ok=True)
+
+    if not dossier_fiches.exists():
+        log.error(f"Dossier fiches introuvable : {dossier_fiches}")
+        return {}
+
+    # Lister tous les fichiers Excel (pas les temp ~$...)
+    fichiers = [
+        f for f in dossier_fiches.rglob("*.xls*")
+        if not f.name.startswith("~$") and f.suffix in (".xlsx", ".xlsm", ".xls")
+    ]
+    if not fichiers:
+        log.warning(f"Aucun fichier Excel dans {dossier_fiches}")
+        return {}
+
+    log.info(f"{len(fichiers)} fiche(s) trouvée(s) dans {dossier_fiches}")
+
+    # Collecter toutes les données par quinzaine
+    # {quinzaine: [df1, df2, ...]}
+    donnees_par_q: dict[str, list[pd.DataFrame]] = {}
+    metas: list[pd.DataFrame] = []
+
+    for fichier in sorted(fichiers):
+        responsable = _extraire_responsable(fichier)
+        log.info(f"  Lecture : {fichier.name} (responsable : {responsable})")
         try:
-            df = lire_sheet(chemin, sheet_name)
-            if df.empty:
-                log.info(f"Sheet '{sheet_name}' vide — ignorée")
+            xl = pd.ExcelFile(fichier, engine="openpyxl")
+        except Exception as e:
+            log.error(f"  Impossible d'ouvrir {fichier.name} : {e}")
+            continue
+
+        # Lire META
+        df_meta = _lire_meta(fichier, xl)
+        if not df_meta.empty:
+            metas.append(df_meta)
+
+        # Lire les feuilles quinzaine
+        feuilles_quinzaine = [s for s in xl.sheet_names if _est_feuille_quinzaine(s)]
+        if not feuilles_quinzaine:
+            log.warning(f"  {fichier.name} — aucune feuille quinzaine détectée")
+            continue
+
+        for nom_feuille in feuilles_quinzaine:
+            # Filtre si quinzaine_unique demandée
+            if quinzaine_unique and nom_feuille != quinzaine_unique:
                 continue
 
-            # Ajouter la colonne quinzaine pour la traçabilité
-            df["quinzaine"] = sheet_name
+            df_q = _lire_feuille_quinzaine(fichier, xl, nom_feuille, responsable)
+            if not df_q.empty:
+                donnees_par_q.setdefault(nom_feuille, []).append(df_q)
 
-            # Nettoyer avancement_pct (convertir en numérique)
-            if "avancement_pct" in df.columns:
-                df["avancement_pct"] = pd.to_numeric(
-                    df["avancement_pct"], errors="coerce"
-                ).fillna(0).astype(int)
+    # Consolider et sauvegarder la META globale
+    df_meta_global = None
+    if metas:
+        df_meta_global = pd.concat(metas, ignore_index=True).drop_duplicates(
+            subset=["projet_id"], keep="last"
+        )
+        # Supprimer source_fichier de la META finale (colonne de travail)
+        if "source_fichier" in df_meta_global.columns:
+            df_meta_global = df_meta_global.drop(columns=["source_fichier"])
+        chemin_meta = dossier_parquet / "meta.parquet"
+        df_meta_global.to_parquet(chemin_meta, index=False)
+        log.info(f"META consolidée → {chemin_meta} ({len(df_meta_global)} projets)")
 
-            resultat["quinzaines"][sheet_name] = df
-            nb_lignes_total += len(df)
-            log.info(f"Sheet '{sheet_name}' — {len(df)} projet(s)")
+    # Sauvegarder les Parquet par quinzaine (stratégie incrémentale)
+    resultats = {}
+    for quinzaine, dfs in sorted(donnees_par_q.items()):
+        chemin_q = dossier_parquet / f"{quinzaine}.parquet"
+        est_courante = (quinzaine == quinzaine_courante)
 
-        except Exception as e:
-            resultat["erreurs"].append(f"Erreur lecture '{sheet_name}' : {e}")
+        if chemin_q.exists() and not force and not est_courante:
+            log.info(f"  {quinzaine} — Parquet existant, skip (quinzaine passée)")
+            continue
 
-    resultat["stats"] = {
-        "nb_sheets_quinzaine": len(resultat["quinzaines"]),
-        "nb_lignes_total":     nb_lignes_total,
-        "meta_presente":       not resultat["meta"].empty,
-        "erreurs":             len(resultat["erreurs"]),
-    }
+        # Concat brut de tous les contributeurs
+        df_consolide = pd.concat(dfs, ignore_index=True)
 
-    return resultat
+        # Fusion des projets partagés entre plusieurs fichiers
+        nb_avant = len(df_consolide)
+        df_consolide = _fusionner_lignes(df_consolide, df_meta_global)
+        nb_apres = len(df_consolide)
+        if nb_avant != nb_apres:
+            log.info(f"  {quinzaine} — fusion : {nb_avant} lignes → {nb_apres} "
+                     f"({nb_avant - nb_apres} doublon(s) fusionné(s))")
 
+        # Joindre META pour enrichir avec date_debut, date_fin_prevue, budget_jours, etc.
+        if df_meta_global is not None:
+            df_meta_join = df_meta_global[
+                [c for c in ["projet_id", "domaine", "entite_concerne", "effectifs",
+                              "date_debut", "date_fin_prevue", "priorite",
+                              "budget_jours", "description", "type"]
+                 if c in df_meta_global.columns]
+            ].drop_duplicates(subset=["projet_id"])
+            df_consolide = df_consolide.merge(df_meta_join, on="projet_id", how="left",
+                                              suffixes=("", "_meta"))
 
-def pipeline_complet(config_path="config.yaml") -> bool:
-    """
-    Pipeline principal : lit monito.xlsx et stocke tout en Parquet.
+        df_consolide.to_parquet(chemin_q, index=False)
+        resultats[quinzaine] = len(df_consolide)
+        statut_str = "COURANTE" if est_courante else "nouvelle"
+        log.info(f"  {quinzaine} [{statut_str}] → {chemin_q} ({len(df_consolide)} lignes)")
 
-    Usage :
-        from excel_parser import pipeline_complet
-        succes = pipeline_complet()
-        # ou depuis la racine : python run_pipeline.py
-
-    Retourne True si au moins une quinzaine a été stockée.
-    """
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    sys.path.insert(0, str(Path(__file__).parent))
-    try:
-        from storage.storage import StorageManager
-    except ImportError:
-        from storage import StorageManager  # type: ignore
-
-    cfg = _cfg(config_path)
-    chemin_excel = cfg.get("paths", {}).get("excel_source", "data/monito.xlsx")
-
-    print(f"\nPipeline — lecture de : {chemin_excel}")
-
-    resultat = parser_excel(chemin_excel, config_path)
-
-    # Afficher les erreurs
-    if resultat["erreurs"]:
-        print(f"\nErreurs ({len(resultat['erreurs'])}) :")
-        for e in resultat["erreurs"]:
-            print(f"  ✗ {e}")
-
-    if not resultat["quinzaines"]:
-        print("Aucune quinzaine trouvée — vérifier le fichier Excel.")
-        return False
-
-    sm = StorageManager(config_path)
-
-    # Sauvegarder chaque quinzaine
-    nb_ok = 0
-    for nom_q, df in resultat["quinzaines"].items():
-        if sm.sauvegarder_quinzaine(df, nom_q):
-            nb_ok += 1
-
-    # Sauvegarder la META si présente
-    if not resultat["meta"].empty:
-        sm.sauvegarder_meta(resultat["meta"])
-
-    # Résumé
-    stats = resultat["stats"]
-    print(f"\nRésumé :")
-    print(f"  Quinzaines chargées : {nb_ok} / {stats['nb_sheets_quinzaine']}")
-    print(f"  Lignes totales      : {stats['nb_lignes_total']}")
-    print(f"  META                : {'oui' if stats['meta_presente'] else 'non'}")
-
-    infos = sm.infos()
-    print(f"\nStockage Parquet :")
-    print(f"  Quinzaines en base  : {infos['quinzaines']}")
-    print(f"  Projets uniques     : {infos['nb_projets']}")
-
-    return nb_ok > 0
+    return resultats
 
 
-if __name__ == "__main__":
+def main():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    pipeline_complet()
+
+    parser = argparse.ArgumentParser(description="Conversion fiches Excel → Parquet")
+    parser.add_argument("--config",     default="config.yaml")
+    parser.add_argument("--force",      action="store_true",
+                        help="Retraiter toutes les quinzaines même passées")
+    parser.add_argument("--quinzaine",  default=None,
+                        help="Traiter une seule quinzaine (ex: T1_2026_R1)")
+    args = parser.parse_args()
+
+    config = _charger_config(args.config)
+    paths  = config.get("paths", {})
+
+    dossier_fiches  = paths.get("fiches_individuelles", "Monitoring/Fiches_individuelles")
+    dossier_parquet = paths.get("parquet",              "storage/parquet")
+    quinzaine_cour  = _quinzaine_courante(config)
+
+    log.info(f"Quinzaine courante : {quinzaine_cour}")
+    log.info(f"Dossier fiches     : {dossier_fiches}")
+    log.info(f"Dossier parquet    : {dossier_parquet}")
+
+    resultats = parser_fiches(
+        dossier_fiches=dossier_fiches,
+        dossier_parquet=dossier_parquet,
+        quinzaine_courante=quinzaine_cour,
+        force=args.force,
+        quinzaine_unique=args.quinzaine,
+    )
+
+    if resultats:
+        print(f"\n✓ {len(resultats)} quinzaine(s) traitée(s) :")
+        for q, n in sorted(resultats.items()):
+            print(f"  {q} → {n} ligne(s)")
+    else:
+        print("\nAucune quinzaine nouvelle à traiter.")
+    print()
+
+
+if __name__ == "__main__":
+    main()
